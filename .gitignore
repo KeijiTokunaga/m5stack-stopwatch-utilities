@@ -1,0 +1,8 @@
+**/.pio/
+**/node_modules/
+**/.expo/
+**/dist/
+*.log
+
+/expo-app/
+.DS_Store
