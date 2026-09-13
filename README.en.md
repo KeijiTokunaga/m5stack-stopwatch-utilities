@@ -33,3 +33,7 @@ The timer continues in other apps and with the display asleep. A phase ends with
 Wi-Fi setup can be exited with yellow hold; its access point is stopped. With no saved network, setup opens at boot but offline apps remain accessible. Aquarium state and app selection are not persisted. IMU and speaker are initialized for the integrated apps; microphone and BLE remain unused.
 
 v1.2.0: board build and host tests passed (launcher, quotes/energy, ten-minute aquarium stress, timer lifecycle). On 2026-09-13, USB upload and hash verification succeeded. Serial diagnostics confirmed v1.2.0 boot, home Wi-Fi, HTTP 200/API status 0 and live quotes; the 45-second check passed with 11 quote-ready samples and no crash. Integrated display/touch/buttons/IMU/sound/vibration remain unverified. See README.md for test commands.
+
+## v1.2.2
+
+The launcher uses English labels and Font4. In Pomodoro, significant lift/rotation wakes a dimmed or sleeping display without starting or pausing the timer. IMU samples every 50 ms require two consecutive acceleration deviations above 0.22g or angular speeds above 45 degrees/s. Normal 15-second dim and 30-second sleep timeouts resume after motion stops. Physical sensitivity remains unverified.

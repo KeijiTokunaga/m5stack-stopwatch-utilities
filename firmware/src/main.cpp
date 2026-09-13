@@ -12,6 +12,7 @@
 #include "Screens.h"
 #include "Quote.h"
 #include "Energy.h"
+#include "MotionWake.h"
 #include "Trust.h"
 #include "medaka/World.h"
 #include "medaka/Energy.h"
@@ -21,6 +22,8 @@ M5Canvas frame(&M5.Display);
 aquarium::Battery battery;
 aquarium::Screens screens;
 Energy energy;
+MotionWake motionWake;
+uint32_t lastMotionSample=0;
 WebServer server(80);
 struct Network {String ssid,pass;};
 Network networks[2];
@@ -190,12 +193,12 @@ void render() {
   frame.fillSprite(rgb(8,17,26));frame.setTextDatum(middle_center);
   if(screens.menu) {
     label("APPS",72,4,rgb(150,174,191));
-    const char* names[]={"ドル表示アプリ","水槽アプリ","電池残量表示","Wi-Fi設定","ポモドーロ"};
+    const char* names[]={"USD / JPY","Aquarium","Battery","Wi-Fi Settings","Pomodoro"};
     for(int i=0;i<aquarium::Screens::count;++i){
       int y=aquarium::Screens::top+i*(aquarium::Screens::rowHeight+aquarium::Screens::rowGap);
       frame.fillRoundRect(aquarium::Screens::left,y,aquarium::Screens::width,aquarium::Screens::rowHeight,12,
         i==screens.selected?rgb(36,86,92):rgb(19,35,47));
-      frame.setFont(&fonts::efontJA_24);frame.setTextColor(0xFFFF);
+      frame.setFont(&fonts::Font4);frame.setTextColor(0xFFFF);
       frame.drawString(names[i],233,y+aquarium::Screens::rowHeight/2);
     }
     label("YELLOW: NEXT   BLUE: OPEN",399,2,rgb(231,203,100));
@@ -300,6 +303,16 @@ void loop(){
   if(setupMode){server.handleClient();if(now-portalStarted>=120000){stopPortal();screens.openMenu();}}
   bool screenChanged=old!=screens.app||wasMenu!=screens.menu;
   if(screens.tank())medaka::update(now,interaction||touch.isPressed());
+  bool motionWoke=false;
+  if(!screens.pomodoro()||screenChanged)motionWake.reset();
+  if(screens.pomodoro()&&medaka::imu&&now-lastMotionSample>=50){
+    lastMotionSample=now;
+    if(M5.Imu.update()){
+      auto data=M5.Imu.getImuData();
+      motionWoke=motionWake.sample(data.accel.x,data.accel.y,data.accel.z,data.gyro.x,data.gyro.y,data.gyro.z);
+      if(motionWoke)energy.wake(now);
+    }
+  }
   if(restartAt&&int32_t(now-restartAt)>=0)ESP.restart();
   if(now-lastBattery>=30000||lastBattery==0||screenChanged){lastBattery=now;charging=M5.Power.isCharging()==m5::Power_Class::is_charging_t::is_charging;level=battery.update(M5.Power.getBatteryLevel(),charging);}
   int brightness=screens.tank()?medaka::energy.brightness(false):energy.brightness(now,level,charging,setupMode||setupPending);
@@ -313,7 +326,7 @@ void loop(){
   wantNetwork=viewing&&hasNetwork&&(interval>0||fetchRequested||networkState==3);
   bool changed=false;Quote next;
   if(xQueueReceive(quotes,&next,0)==pdTRUE&&next.epoch>=quote.epoch){quote=next;changed=true;if(historyCount==120){memmove(history,history+1,119*sizeof(float));historyCount--;}history[historyCount++]=(quote.bid+quote.ask)/2;}
-  if(brightness>0&&(changed||interaction||now-lastFrame>=(screens.tank()?medaka::energy.frameInterval():screens.pomodoro()?200:1000)||screenChanged)){lastFrame=now;render();}
+  if(brightness>0&&(changed||interaction||motionWoke||now-lastFrame>=(screens.tank()?medaka::energy.frameInterval():screens.pomodoro()?200:1000)||screenChanged)){lastFrame=now;render();}
   if(Serial.available()&&Serial.read()=='?')Serial.printf("FX HOTSPOT version=%s wifi=%d network=%d state=%d quote=%d battery=%d charging=%d brightness=%d screen=%s heap=%u http=%d api=%d cpu=%u\n",kFirmwareVersion,WiFi.getMode()!=WIFI_OFF,selectedNetwork.load(),networkState.load(),quote.received!=0,level,charging,appliedBrightness,screens.name(),ESP.getFreeHeap(),lastHttpStatus.load(),lastApiStatus.load(),getCpuFrequencyMhz());
   delay(screens.tank()?medaka::energy.loopDelay():brightness?20:50);
 }

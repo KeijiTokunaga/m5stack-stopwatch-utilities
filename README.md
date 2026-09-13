@@ -137,3 +137,7 @@ rtk proxy /tmp/fx-medaka-tests
 rtk proxy clang++ -std=c++17 -I firmware/src -I firmware/src/pomodoro firmware/test/pomodoro.cpp -o /tmp/fx-pomodoro-tests
 rtk proxy /tmp/fx-pomodoro-tests
 ```
+
+## v1.2.2
+
+選択画面は USD / JPY・Aquarium・Battery・Wi-Fi Settings・Pomodoro の英語表記です。ポモドーロ画面では、持ち上げる・回すなどの大きな動きをIMUで検出すると減光・消灯を解除します。50ms間隔で加速度の変化0.22g超または回転速度45度/秒超が2回続くと復帰します。動きが止まった後は通常どおり15秒で減光、30秒で消灯します。計測の開始・停止は行いません。検出感度の実機評価は未実施です。
