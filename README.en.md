@@ -10,9 +10,9 @@ On the iPhone enable Allow Others to Join and Maximize Compatibility, and keep t
 
 Home is attempted first (8 seconds), then iPhone (8 seconds). Failed connection attempts stop Wi-Fi and retry after 60 seconds while awake. Normal updates are every 5 seconds, every 15 seconds at <=20% battery, manual at <=10%. On battery, dim after 15 seconds and sleep the display/stop networking after 30 seconds without input. Active network calls finish within their timeouts before Wi-Fi turns off. Charging keeps the screen on with 5-second updates. Battery lifetime is not measured.
 
-Hold yellow anywhere to open the five-app launcher: USD/JPY, Aquarium, Battery, Wi-Fi Settings, Pomodoro. Click yellow to move down, blue to launch, or tap a row. In USD/JPY, short clicks/taps request updates; blue hold or touch hold opens setup. All other screens stop normal quote traffic. Last prices and source timestamps remain visible when stale or unavailable.
+Hold yellow anywhere to open the six-app launcher: USD/JPY, Aquarium, Battery, Wi-Fi Settings, Pomodoro, Location. Click yellow to move down, blue to launch, or tap a row. In USD/JPY, short clicks/taps request updates; blue hold or touch hold opens setup. All other screens stop normal quote traffic. Last prices and source timestamps remain visible when stale or unavailable.
 
-Build with `rtk proxy pio run -d firmware`; see README.md for tests, upload commands and official sources. The current firmware identifies itself as `FW v1.2.2` on the Battery screen and in the USB `?` response. Hardware compilation and host tests are verified; actual hotspot connectivity and battery lifetime require physical testing after Wi-Fi setup.
+Build with `rtk proxy pio run -d firmware`; see README.md for tests, upload commands and official sources. The current firmware identifies itself as `FW v1.3.0` on the Battery screen and in the USB `?` response. Hardware compilation and host tests are verified; actual hotspot connectivity and battery lifetime require physical testing after Wi-Fi setup.
 
 On 2026-09-12, v1.1.1 passed the board build, existing host tests, USB upload and flash hash verification. Device serial diagnostics confirmed boot, home Wi-Fi, HTTPS HTTP 200/API status 5, and restoration to 80MHz. Live quotes remain unverified during API maintenance. Visual display, iPhone hotspot and battery lifetime remain unverified. These are historical v1.1.1 results. Open Battery from the launcher to see the installed version.
 
@@ -37,3 +37,7 @@ v1.2.0: board build and host tests passed (launcher, quotes/energy, ten-minute a
 ## v1.2.2
 
 The launcher uses English labels and Font4. In Pomodoro, significant lift/rotation wakes a dimmed or sleeping display without starting or pausing the timer. IMU samples every 50 ms require two consecutive acceleration deviations above 0.22g or angular speeds above 45 degrees/s. Normal 15-second dim and 30-second sleep timeouts resume after motion stops. Physical sensitivity remains unverified.
+
+## v1.3.0
+
+Location is the sixth app. After explicit consent, it sends nearby Wi-Fi BSSIDs, signal strengths and channels through an authenticated user-operated proxy to estimate location and display a Google Static Maps JPEG with the reported accuracy. SSIDs and Wi-Fi passwords are never sent. The URL-signing secret remains on the proxy; the API key in each signed map URL must be protected with API restrictions, signing and quotas. Coordinates and map images stay in device RAM only. See `proxy/README.md` for deployment. Host tests and the board build pass; live Google API and on-device visual verification remain pending.

@@ -14,6 +14,8 @@
 #include "Energy.h"
 #include "MotionWake.h"
 #include "Trust.h"
+#include "Location.h"
+#include "LocationTrust.h"
 #include "medaka/World.h"
 #include "medaka/Energy.h"
 #include "pomodoro/Pomodoro.h"
@@ -28,13 +30,24 @@ WebServer server(80);
 struct Network {String ssid,pass;};
 Network networks[2];
 QueueHandle_t quotes;
+QueueHandle_t locationFixes;
+SemaphoreHandle_t mapMutex;
 std::atomic<uint32_t> offTicket{0},offAck{0};
 Quote quote;
 std::atomic<bool> wantNetwork{false},networkIdle{true},fetchRequested{false};
+std::atomic<bool> locationRequested{false};
+// 0 idle, 1 connecting, 2 scanning, 3 locating, 4 loading map, 5 ready,
+// 6 insufficient APs, 7 location service error, 8 map error
+std::atomic<int> locationState{0};
 // 0 off, 1 connecting, 2 connected, 3 fetching, 4 unavailable, 5 API error, 6 clock error, 7 maintenance
 std::atomic<int> networkState{0},selectedNetwork{-1};
 std::atomic<int> lastHttpStatus{0},lastApiStatus{-1};
 bool ready=false,setupMode=false,setupPending=false,charging=false;
+bool locationConsent=false;
+bool showLocationQr=false;
+String locationProxy,locationToken;
+location::Fix currentFix;
+uint8_t* mapJpeg=nullptr;size_t mapJpegSize=0;
 int level=-1,appliedBrightness=-1;
 String apPassword;
 uint32_t lastFrame=0,lastBattery=0,lastRequest=0,portalStarted=0,restartAt=0;
@@ -78,7 +91,9 @@ void configurePortal(){
     for(int i=0;i<2;i++){
       page+="<h2>"+String(i?"iPhoneのインターネット共有":"自宅Wi-Fi")+"</h2><p><input name='ssid"+String(i)+"' maxlength='32' placeholder='Wi-Fi名（SSID）' value=\""+htmlEscape(networks[i].ssid)+"\"></p><p><input type='password' name='pass"+String(i)+"' maxlength='63' placeholder='Wi-Fiパスワード'></p>";
     }
-    page+=R"HTML(<p>同じSSIDでパスワードを空欄にすると保存済み設定を維持。SSIDを空欄にするとその接続先を削除します。少なくとも1件設定してください。</p><p>iPhoneは「ほかの人の接続を許可」と「互換性を優先」をオンにし、接続時は共有設定画面を開いてください。</p><button>保存して再起動</button></form></body>)HTML";
+    page+=R"HTML(<p>同じSSIDでパスワードを空欄にすると保存済み設定を維持。SSIDを空欄にするとその接続先を削除します。少なくとも1件設定してください。</p><p>iPhoneは「ほかの人の接続を許可」と「互換性を優先」をオンにし、接続時は共有設定画面を開いてください。</p><hr><h2>Location / Google Maps</h2><p>同意した場合だけ、周辺Wi-FiのBSSID・電波強度・チャンネルを指定したプロキシ経由でGoogleへ送信して現在地を推定します。通信先とネットワーク事業者は通信に必要なIPアドレスを扱います。SSIDとWi-Fiパスワードは送信しません。地図画像は端末へ保存しません。</p><p><a href="https://github.com/KeijiTokunaga/m5stack-stopwatch-utilities/blob/main/PRIVACY.md">アプリのプライバシーポリシー</a> / <a href="https://github.com/KeijiTokunaga/m5stack-stopwatch-utilities/blob/main/TERMS.md">利用規約</a> / <a href="https://policies.google.com/privacy">Googleプライバシーポリシー</a> / <a href="https://maps.google.com/help/terms_maps/">Google Maps利用規約</a></p>)HTML";
+    page+="<p><input name='locationProxy' maxlength='180' placeholder='https://your-proxy.vercel.app' value=\""+htmlEscape(locationProxy)+"\"></p><p><input type='password' name='locationToken' maxlength='200' placeholder='端末トークン（空欄なら保存済みを維持）'></p>";
+    page+="<p><label><input type='checkbox' name='locationConsent' value='yes' "+String(locationConsent?"checked":"")+"> 上記の位置推定のための送信に同意する</label></p><button>保存して再起動</button></form></body>";
     server.sendHeader("Cache-Control","no-store");server.send(200,"text/html; charset=utf-8",page);
   });
   server.on("/save",HTTP_POST,[]{
@@ -92,6 +107,16 @@ void configurePortal(){
       any|=!ssid.isEmpty();doc["networks"][i]["ssid"]=ssid;doc["networks"][i]["pass"]=pass;
     }
     if(!any){server.send(400,"text/plain; charset=utf-8","接続先を1件以上入力してください");return;}
+    bool consent=server.hasArg("locationConsent");
+    String proxy=server.arg("locationProxy"),token=server.arg("locationToken");proxy.trim();token.trim();
+    if(consent){
+      if(token.isEmpty()&&proxy==locationProxy)token=locationToken;
+      if(!proxy.startsWith("https://")||proxy.length()>180||proxy.indexOf('?',8)>=0||proxy.indexOf('#',8)>=0||token.length()<16||token.length()>200){
+        server.send(400,"text/plain; charset=utf-8","LocationのHTTPSプロキシURLまたは端末トークンを確認してください");return;
+      }
+      while(proxy.endsWith("/"))proxy.remove(proxy.length()-1);
+    }else{proxy="";token="";}
+    doc["location"]["proxy"]=proxy;doc["location"]["token"]=token;doc["location"]["consent"]=consent;
     String encoded;serializeJson(doc,encoded);Preferences prefs;
     if(!prefs.begin("fx-wifi",false)){server.send(500,"text/plain","Storage error");return;}
     auto bytes=prefs.putString("networks",encoded);prefs.end();
@@ -101,7 +126,7 @@ void configurePortal(){
 }
 void startPortal(){
   setupMode=true;setupPending=false;portalStarted=millis();
-  char pass[13];snprintf(pass,sizeof(pass),"%08lx",(unsigned long)esp_random());apPassword=pass;
+  char pass[33];snprintf(pass,sizeof(pass),"%08lx%08lx%08lx%08lx",(unsigned long)esp_random(),(unsigned long)esp_random(),(unsigned long)esp_random(),(unsigned long)esp_random());apPassword=pass;
   WiFi.mode(WIFI_AP);WiFi.softAP("StopWatch-FX",apPassword.c_str());server.begin();
 }
 void stopPortal(){server.stop();WiFi.softAPdisconnect(true);WiFi.mode(WIFI_OFF);setupMode=false;energy.wake(millis());}
@@ -149,6 +174,51 @@ bool getQuote(){
   }
   networkState=success?2:maintenance?7:5;return success;
 }
+struct TlsCpuClock {
+  uint32_t previous=getCpuFrequencyMhz();
+  TlsCpuClock(){setCpuFrequencyMhz(240);}
+  ~TlsCpuClock(){setCpuFrequencyMhz(previous);}
+};
+bool locationConfigured(){return locationConsent&&!locationProxy.isEmpty()&&!locationToken.isEmpty();}
+bool getLocation(){
+  locationState=2;
+  int found=WiFi.scanNetworks(false,true,false,300);
+  JsonDocument request;JsonArray aps=request["wifiAccessPoints"].to<JsonArray>();
+  for(int i=0;i<found&&aps.size()<20;i++){
+    String mac=WiFi.BSSIDstr(i);int rssi=WiFi.RSSI(i),channel=WiFi.channel(i);
+    if(!location::validBssid(mac.c_str())||rssi<-128||rssi>-10||channel<1||channel>196)continue;
+    JsonObject ap=aps.add<JsonObject>();ap["macAddress"]=mac;ap["signalStrength"]=rssi;ap["channel"]=channel;
+  }
+  WiFi.scanDelete();
+  if(aps.size()<2){locationState=6;return false;}
+  String body;serializeJson(request,body);locationState=3;
+  TlsCpuClock clock;
+  WiFiClientSecure client;client.setCACert(LOCATION_ROOT_CA);client.setHandshakeTimeout(6);
+  HTTPClient http;http.setConnectTimeout(6000);http.setTimeout(8000);
+  String auth="Bearer "+locationToken;
+  if(!http.begin(client,locationProxy+"/api/locate")){locationState=7;return false;}
+  http.addHeader("Authorization",auth);http.addHeader("Content-Type","application/json");
+  int status=http.POST((uint8_t*)body.c_str(),body.length());int responseSize=http.getSize();
+  String response=status==200&&responseSize>0&&responseSize<=2048?http.getString():"";http.end();
+  location::Fix fix;
+  if(status!=200||!location::parseFix((const uint8_t*)response.c_str(),response.length(),fix)){locationState=7;return false;}
+  JsonDocument resultDoc;
+  if(deserializeJson(resultDoc,response)||!resultDoc["mapUrl"].is<const char*>()){locationState=7;return false;}
+  String mapUrl=resultDoc["mapUrl"].as<String>();
+  locationState=4;
+  WiFiClientSecure googleClient;googleClient.setCACert(LOCATION_ROOT_CA);googleClient.setHandshakeTimeout(6);
+  HTTPClient image;image.setConnectTimeout(6000);image.setTimeout(12000);
+  if(!image.begin(googleClient,mapUrl)){locationState=8;return false;}
+  status=image.GET();int length=image.getSize();
+  if(status!=200||length<=0||length>262144){image.end();locationState=8;return false;}
+  uint8_t* next=(uint8_t*)heap_caps_malloc(length,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+  if(!next){image.end();locationState=8;return false;}
+  size_t read=image.getStreamPtr()->readBytes(next,length);image.end();
+  if(read!=(size_t)length||length<2||next[0]!=0xff||next[1]!=0xd8){free(next);locationState=8;return false;}
+  if(!wantNetwork){free(next);locationState=0;return false;}
+  xSemaphoreTake(mapMutex,portMAX_DELAY);uint8_t* old=mapJpeg;mapJpeg=next;mapJpegSize=length;xSemaphoreGive(mapMutex);free(old);
+  xQueueOverwrite(locationFixes,&fix);locationState=5;return true;
+}
 void networkTask(void*){
   bool active=false,attempted=false,failedFetch=false;
   uint32_t lastAttempt=0,lastFetch=0;
@@ -167,6 +237,8 @@ void networkTask(void*){
             while(wantNetwork&&time(nullptr)<1700000000&&millis()-start<5000)vTaskDelay(pdMS_TO_TICKS(100));
           }
         }
+      }else if(locationRequested.exchange(false)){
+        getLocation();
       }else if(fetchRequested&&(!failedFetch||millis()-lastFetch>=30000)){
         networkState=3;fetchRequested=false;failedFetch=!getQuote();lastFetch=millis();
       }
@@ -193,7 +265,7 @@ void render() {
   frame.fillSprite(rgb(8,17,26));frame.setTextDatum(middle_center);
   if(screens.menu) {
     label("APPS",72,4,rgb(150,174,191));
-    const char* names[]={"USD / JPY","Aquarium","Battery","Wi-Fi Settings","Pomodoro"};
+    const char* names[]={"USD / JPY","Aquarium","Battery","Wi-Fi Settings","Pomodoro","Location"};
     for(int i=0;i<aquarium::Screens::count;++i){
       int y=aquarium::Screens::top+i*(aquarium::Screens::rowHeight+aquarium::Screens::rowGap);
       frame.fillRoundRect(aquarium::Screens::left,y,aquarium::Screens::width,aquarium::Screens::rowHeight,12,
@@ -215,9 +287,30 @@ void render() {
     label(level<0?"UNAVAILABLE":charging?"CHARGING":"ESTIMATED",331);
     label("HOLD YELLOW: APPS",374,2,rgb(231,203,100));
     label(String("FW v")+kFirmwareVersion,405,2,rgb(159,194,183));
+  } else if(screens.location()) {
+    label("LOCATION",43,4,rgb(150,174,191));
+    if(!locationConfigured()){
+      label("SETUP AND CONSENT REQUIRED",190,2,rgb(242,182,95));
+      label("Open Wi-Fi Settings",225);label("to enable Google Maps",253);
+    }else if(locationState==5&&currentFix.valid&&showLocationQr){
+      String mapsLink="https://www.google.com/maps/search/?api=1&query="+String(currentFix.lat,6)+","+String(currentFix.lng,6);
+      frame.fillRect(123,83,220,220,0xFFFF);frame.qrcode(mapsLink.c_str(),133,93,200,6,true);
+      label("SCAN TO OPEN IN GOOGLE MAPS",342,2,rgb(150,174,191));
+      label("BLUE: MAP",399,2,rgb(231,203,100));
+    }else if(locationState==5&&currentFix.valid){
+      xSemaphoreTake(mapMutex,portMAX_DELAY);
+      if(mapJpeg&&mapJpegSize)frame.drawJpg(mapJpeg,mapJpegSize,73,73);
+      xSemaphoreGive(mapMutex);
+      label("Estimated accuracy: "+String(currentFix.accuracy,0)+" m",421,2,rgb(150,174,191));
+    }else{
+      const char* state=locationState==1?"CONNECTING":locationState==2?"SCANNING WI-FI":locationState==3?"LOCATING":locationState==4?"LOADING MAP":locationState==6?"NOT ENOUGH ACCESS POINTS":locationState==7?"LOCATION SERVICE ERROR":locationState==8?"MAP DOWNLOAD ERROR":"PRESS TO LOCATE";
+      label(state,211,4,locationState>=6?rgb(242,182,95):rgb(108,223,179));
+      label("Google Maps",255,2,rgb(150,174,191));
+      label("YELLOW / TAP: UPDATE",399,2,rgb(231,203,100));
+    }
   } else if(setupMode) {
     label("Wi-Fi SETUP",100,4);label("Connect to StopWatch-FX",160);
-    label("Password: "+apPassword,205,4);label("Open in your browser",260);
+    label("Password: "+apPassword,205,2);label("Open in your browser",260);
     label("http://192.168.4.1",300,4);label("2.4 GHz Wi-Fi only",350);
   } else if(setupPending) {
     label("OPENING Wi-Fi SETUP",200,4);
@@ -252,18 +345,20 @@ void launchApp(uint32_t now){
   if(screens.app==aquarium::App::Wifi)requestSetup();
   if(screens.dollar()){fetchRequested=true;lastRequest=now;}
   if(screens.tank())medaka::enter(now);
+  if(screens.location()&&locationConfigured()){showLocationQr=false;locationState=1;locationRequested=true;}
 }
 void setup(){
   auto cfg=M5.config();cfg.internal_spk=true;cfg.internal_mic=false;cfg.internal_imu=true;
   M5.begin(cfg);Serial.begin(115200);M5.Display.setRotation(0);M5.Display.setBrightness(80);
   frame.setColorDepth(16);frame.setPsram(true);ready=frame.createSprite(466,466)!=nullptr;
-  quotes=xQueueCreate(1,sizeof(Quote));
-  if(!ready||!quotes){ready=false;M5.Display.drawString("Memory allocation failed",100,233);return;}
+  quotes=xQueueCreate(1,sizeof(Quote));locationFixes=xQueueCreate(1,sizeof(location::Fix));mapMutex=xSemaphoreCreateMutex();
+  if(!ready||!quotes||!locationFixes||!mapMutex){ready=false;M5.Display.drawString("Memory allocation failed",100,233);return;}
   medaka::imu=M5.Imu.isEnabled();pomodoro::begin();
   setCpuFrequencyMhz(80);WiFi.mode(WIFI_OFF);WiFi.persistent(false);
   Preferences prefs;prefs.begin("fx-wifi",true);String stored=prefs.getString("networks");JsonDocument doc;
   if(!stored.isEmpty()&&!deserializeJson(doc,stored)){
     for(int i=0;i<2;i++){networks[i].ssid=doc["networks"][i]["ssid"]|"";networks[i].pass=doc["networks"][i]["pass"]|"";}
+    locationProxy=doc["location"]["proxy"]|"";locationToken=doc["location"]["token"]|"";locationConsent=doc["location"]["consent"]|false;
   }else{networks[0].ssid=prefs.getString("ssid");networks[0].pass=prefs.getString("pass");}
   prefs.end();configurePortal();energy.wake(millis());fetchRequested=true;
   if(xTaskCreatePinnedToCore(networkTask,"forex",12288,nullptr,1,nullptr,0)!=pdPASS){ready=false;M5.Display.drawString("Network task failed",100,233);return;}
@@ -302,6 +397,10 @@ void loop(){
   if(setupPending&&offAck==offTicket)startPortal();
   if(setupMode){server.handleClient();if(now-portalStarted>=120000){stopPortal();screens.openMenu();}}
   bool screenChanged=old!=screens.app||wasMenu!=screens.menu;
+  if(screenChanged&&old==aquarium::App::Location&&!screens.location()){
+    xSemaphoreTake(mapMutex,portMAX_DELAY);free(mapJpeg);mapJpeg=nullptr;mapJpegSize=0;xSemaphoreGive(mapMutex);
+    currentFix=location::Fix{};showLocationQr=false;locationState=0;
+  }
   if(screens.tank())medaka::update(now,interaction||touch.isPressed());
   bool motionWoke=false;
   if(!screens.pomodoro()||screenChanged)motionWake.reset();
@@ -319,13 +418,19 @@ void loop(){
   if(brightness!=appliedBrightness){appliedBrightness=brightness;if(brightness==0)M5.Display.sleep();else{M5.Display.wakeup();M5.Display.setBrightness(brightness);}}
   uint32_t interval=energy.refresh(level,charging);
   bool manual=!consumed&&screens.dollar()&&(blueClick||yellowClick||touch.wasClicked()||(wasOff&&interaction));
+  bool locationQr=!consumed&&screens.location()&&locationState==5&&blueClick;
+  if(locationQr){showLocationQr=!showLocationQr;consumed=true;}
+  bool locationManual=!consumed&&screens.location()&&(yellowClick||touch.wasClicked());
   bool hasNetwork=!networks[0].ssid.isEmpty()||!networks[1].ssid.isEmpty();
   if(manual){if(!hasNetwork)requestSetup();else{fetchRequested=true;lastRequest=now;}}
+  if(locationManual){if(!hasNetwork||!locationConfigured())requestSetup();else{locationState=1;locationRequested=true;}}
   bool viewing=screens.dollar()&&brightness>0;
   if(viewing&&interval&&now-lastRequest>=interval){fetchRequested=true;lastRequest=now;}
-  wantNetwork=viewing&&hasNetwork&&(interval>0||fetchRequested||networkState==3);
+  bool locating=screens.location()&&locationConfigured()&&(locationRequested||(locationState.load()>=1&&locationState.load()<=4));
+  wantNetwork=hasNetwork&&((viewing&&(interval>0||fetchRequested||networkState==3))||locating);
   bool changed=false;Quote next;
   if(xQueueReceive(quotes,&next,0)==pdTRUE&&next.epoch>=quote.epoch){quote=next;changed=true;if(historyCount==120){memmove(history,history+1,119*sizeof(float));historyCount--;}history[historyCount++]=(quote.bid+quote.ask)/2;}
+  location::Fix fix;if(xQueueReceive(locationFixes,&fix,0)==pdTRUE){currentFix=fix;changed=true;}
   if(brightness>0&&(changed||interaction||motionWoke||now-lastFrame>=(screens.tank()?medaka::energy.frameInterval():screens.pomodoro()?200:1000)||screenChanged)){lastFrame=now;render();}
   if(Serial.available()&&Serial.read()=='?')Serial.printf("FX HOTSPOT version=%s wifi=%d network=%d state=%d quote=%d battery=%d charging=%d brightness=%d screen=%s heap=%u http=%d api=%d cpu=%u\n",kFirmwareVersion,WiFi.getMode()!=WIFI_OFF,selectedNetwork.load(),networkState.load(),quote.received!=0,level,charging,appliedBrightness,screens.name(),ESP.getFreeHeap(),lastHttpStatus.load(),lastApiStatus.load(),getCpuFrequencyMhz());
   delay(screens.tank()?medaka::energy.loopDelay():brightness?20:50);
