@@ -140,7 +140,12 @@ void renderScene() {
     float a=(211+i*.9f)*kPi/180;
     frame.fillCircle(233+std::cos(a)*222,233+std::sin(a)*222,1,color(83,117,113));
   }
-  if(!imu) { frame.setTextColor(color(143,164,156)); frame.setTextDatum(middle_center); frame.drawString("IMU unavailable",233,390,2); }
+  if(!imu) {
+    frame.setTextColor(color(143,164,156));
+    frame.setTextDatum(middle_center);
+    frame.setFont(&fonts::Font2);
+    frame.drawString("IMU unavailable",233,390);
+  }
   if(world.lightNotice>0) {
     frame.drawEllipse(233,58,12,12,color(143,187,177));
     if(world.lightFrozen) {
@@ -151,4 +156,3 @@ void renderScene() {
   frame.pushSprite(0,0);
   ++frames;
 }
-

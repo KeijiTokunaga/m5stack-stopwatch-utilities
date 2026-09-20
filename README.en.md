@@ -12,7 +12,7 @@ Home is attempted first (8 seconds), then iPhone (8 seconds). Failed connection 
 
 Hold yellow anywhere to open the five-app launcher: USD/JPY, Aquarium, Battery, Wi-Fi Settings, Pomodoro. Click yellow to move down, blue to launch, or tap a row. In USD/JPY, short clicks/taps request updates; blue hold or touch hold opens setup. All other screens stop normal quote traffic. Last prices and source timestamps remain visible when stale or unavailable.
 
-Build with `rtk proxy pio run -d firmware`; see README.md for tests, upload commands and official sources. Hardware compilation and host tests are verified; actual hotspot connectivity and battery lifetime require physical testing after Wi-Fi setup.
+Build with `rtk proxy pio run -d firmware`; see README.md for tests, upload commands and official sources. The current firmware identifies itself as `FW v1.2.2` on the Battery screen and in the USB `?` response. Hardware compilation and host tests are verified; actual hotspot connectivity and battery lifetime require physical testing after Wi-Fi setup.
 
 On 2026-09-12, v1.1.1 passed the board build, existing host tests, USB upload and flash hash verification. Device serial diagnostics confirmed boot, home Wi-Fi, HTTPS HTTP 200/API status 5, and restoration to 80MHz. Live quotes remain unverified during API maintenance. Visual display, iPhone hotspot and battery lifetime remain unverified. These are historical v1.1.1 results. Open Battery from the launcher to see the installed version.
 
