@@ -15,6 +15,7 @@ class Pomodoro {
   }
   void toggle(uint32_t now) { running = !running; last = now; }
   void reset() { running = false; remaining = duration(); }
+  void resetAll() { *this = Pomodoro{}; }
   void skip() { advance(false); }
   bool tick(uint32_t now) {
     if (!running) return false;

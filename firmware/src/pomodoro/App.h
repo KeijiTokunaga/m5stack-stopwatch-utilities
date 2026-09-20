@@ -27,6 +27,7 @@ void action(char key) {
   silence();
   if (key == 'a') timer.toggle(millis());
   if (key == 'r') timer.reset();
+  if (key == 'R') { timer.resetAll(); soundOn = true; }
   if (key == 'n') timer.skip();
   if (key == 'm') soundOn = !soundOn;
   save();

@@ -16,6 +16,8 @@
 #include "Trust.h"
 #include "Location.h"
 #include "LocationTrust.h"
+#include "Weather.h"
+#include "WeatherTrust.h"
 #include "medaka/World.h"
 #include "medaka/Energy.h"
 #include "pomodoro/Pomodoro.h"
@@ -30,10 +32,16 @@ WebServer server(80);
 struct Network {String ssid,pass;};
 Network networks[2];
 QueueHandle_t quotes;
+QueueHandle_t forecasts;
 QueueHandle_t locationFixes;
 SemaphoreHandle_t mapMutex;
 std::atomic<uint32_t> offTicket{0},offAck{0};
 Quote quote;
+weather::Forecast forecast;
+weather::Refresh weatherRefresh;
+bool weatherDetails=false;
+std::atomic<bool> weatherMode{false},weatherBusy{false};
+std::atomic<int> weatherResult{0},weatherHttp{0};
 std::atomic<bool> wantNetwork{false},networkIdle{true},fetchRequested{false};
 std::atomic<bool> locationRequested{false};
 // 0 idle, 1 connecting, 2 scanning, 3 locating, 4 loading map, 5 ready,
@@ -82,6 +90,7 @@ void update(uint32_t now,bool interaction){
 }
 
 #include "pomodoro/App.h"
+#include "paradise/App.h"
 
 String htmlEscape(String value){value.replace("&","&amp;");value.replace("\"","&quot;");value.replace("<","&lt;");value.replace(">","&gt;");return value;}
 void configurePortal(){
@@ -219,6 +228,34 @@ bool getLocation(){
   xSemaphoreTake(mapMutex,portMAX_DELAY);uint8_t* old=mapJpeg;mapJpeg=next;mapJpegSize=length;xSemaphoreGive(mapMutex);free(old);
   xQueueOverwrite(locationFixes,&fix);locationState=5;return true;
 }
+bool getWeather(){
+  weatherResult=1;weatherHttp=0;networkState=3;
+  if(time(nullptr)<1700000000){weatherResult=4;networkState=6;return false;}
+  TlsCpuClock clock;
+  WiFiClientSecure client;client.setCACert(WEATHER_ROOT_CA);client.setHandshakeTimeout(4);
+  HTTPClient http;http.setConnectTimeout(4000);http.setTimeout(4000);
+  bool success=false;
+  if(http.begin(client,weather::url)){
+    weatherHttp=http.GET();
+    if(weatherHttp==200&&wantNetwork){
+      struct Body : Stream {
+        String text;
+        int available() override{return 0;} int read() override{return -1;} int peek() override{return -1;} void flush() override{}
+        size_t write(uint8_t c) override{return write(&c,1);}
+        size_t write(const uint8_t* data,size_t size) override{
+          if(size>12288-text.length())return 0;
+          return text.concat(reinterpret_cast<const char*>(data),size)?size:0;
+        }
+      } body;
+      if(http.getSize()<=12288&&http.writeToStream(&body)>0){
+        weather::Forecast next;
+        if(weather::parse(body.text.c_str(),body.text.length(),millis(),next)&&wantNetwork){xQueueOverwrite(forecasts,&next);success=true;}
+      }
+    }
+    http.end();
+  }
+  weatherResult=success?2:3;networkState=success?2:5;return success;
+}
 void networkTask(void*){
   bool active=false,attempted=false,failedFetch=false;
   uint32_t lastAttempt=0,lastFetch=0;
@@ -240,7 +277,8 @@ void networkTask(void*){
       }else if(locationRequested.exchange(false)){
         getLocation();
       }else if(fetchRequested&&(!failedFetch||millis()-lastFetch>=30000)){
-        networkState=3;fetchRequested=false;failedFetch=!getQuote();lastFetch=millis();
+        networkState=3;bool weather=weatherMode.load();weatherBusy=weather;fetchRequested=false;
+        failedFetch=weather?!getWeather():!getQuote();weatherBusy=false;lastFetch=millis();
       }
     }
     vTaskDelay(pdMS_TO_TICKS(100));
@@ -261,11 +299,12 @@ const char* networkStatus(){
 void label(const String& s,int y,int font=2,uint16_t color=0xFFFF) {
   frame.setTextColor(color);frame.setFont(font==7?&fonts::Font7:font==4?&fonts::Font4:&fonts::Font2);frame.drawString(s,233,y);
 }
+#include "WeatherFace.h"
 void render() {
   frame.fillSprite(rgb(8,17,26));frame.setTextDatum(middle_center);
   if(screens.menu) {
-    label("APPS",72,4,rgb(150,174,191));
-    const char* names[]={"USD / JPY","Aquarium","Battery","Wi-Fi Settings","Pomodoro","Location"};
+    label("APPS",55,4,rgb(150,174,191));
+    const char* names[]={"USD / JPY","Aquarium","Battery","Wi-Fi Settings","Pomodoro","Weather","Paradise","Location"};
     for(int i=0;i<aquarium::Screens::count;++i){
       int y=aquarium::Screens::top+i*(aquarium::Screens::rowHeight+aquarium::Screens::rowGap);
       frame.fillRoundRect(aquarium::Screens::left,y,aquarium::Screens::width,aquarium::Screens::rowHeight,12,
@@ -278,6 +317,23 @@ void render() {
     medaka::renderScene();return;
   } else if(screens.pomodoro()) {
     pomodoro::paint();return;
+  } else if(screens.paradise()) {
+    paradise::paint();return;
+  } else if(screens.weather()) {
+    if(!weatherDetails){paintWeatherFace();return;}
+    label("OSAKA WEATHER",65,4,rgb(150,200,225));
+    const char* state=weatherBusy?"UPDATING":networkState==1?"CONNECTING":networkState==4?"NO WI-FI / RETRY":
+      weatherResult==4?"WAITING FOR CLOCK":weatherResult==3?"UPDATE FAILED / LAST DATA":
+      !forecast.valid?"WAITING FOR FORECAST":weather::stale(forecast,millis(),time(nullptr))?"STALE / LAST FORECAST":"CURRENT / 3-DAY FORECAST";
+    label(state,100,2,rgb(231,203,100));
+    if(forecast.valid){
+      frame.setTextSize(2);label(String(forecast.temperature,1)+" C",149,4);frame.setTextSize(1);
+      label(weather::description(forecast.code),194,4,rgb(123,217,227));
+      label("DATE     HIGH / LOW      RAIN MAX",230,2,rgb(150,174,191));
+      for(int i=0;i<3;++i){const auto& day=forecast.days[i];int y=257+i*44;frame.fillRoundRect(88,y-14,290,40,8,rgb(19,35,47));String rain=day.rain<0?String("--"):String(day.rain)+"%";label(String(day.date+5)+"    "+String(day.high,0)+" / "+String(day.low,0)+" C    "+rain,y,2);label(weather::description(day.code),y+17,2,rgb(150,174,191));}
+      label(String("As of ")+forecast.localTime+" JST",384,2,rgb(150,174,191));
+    }else{label("Waiting for Osaka weather",190,4);label("Saved Wi-Fi / iPhone hotspot",242);label("BLUE HOLD: Wi-Fi SETUP",291,2,rgb(231,203,100));}
+    label("Open-Meteo.com",410,2,rgb(150,174,191));
   } else if(screens.battery()) {
     uint16_t accent=level>=0&&level<=20?rgb(235,158,85):rgb(113,207,176);
     label("BATTERY",103,4,rgb(159,194,183));
@@ -343,17 +399,19 @@ void openApps(){
 void launchApp(uint32_t now){
   screens.launch();energy.wake(now);
   if(screens.app==aquarium::App::Wifi)requestSetup();
-  if(screens.dollar()){fetchRequested=true;lastRequest=now;}
+  if(screens.dollar()){weatherMode=false;fetchRequested=true;lastRequest=now;}
+  if(screens.weather()){weatherDetails=false;weatherMode=true;fetchRequested=false;}
   if(screens.tank())medaka::enter(now);
+  if(screens.paradise())paradise::enter();
   if(screens.location()&&locationConfigured()){showLocationQr=false;locationState=1;locationRequested=true;}
 }
 void setup(){
   auto cfg=M5.config();cfg.internal_spk=true;cfg.internal_mic=false;cfg.internal_imu=true;
   M5.begin(cfg);Serial.begin(115200);M5.Display.setRotation(0);M5.Display.setBrightness(80);
   frame.setColorDepth(16);frame.setPsram(true);ready=frame.createSprite(466,466)!=nullptr;
-  quotes=xQueueCreate(1,sizeof(Quote));locationFixes=xQueueCreate(1,sizeof(location::Fix));mapMutex=xSemaphoreCreateMutex();
-  if(!ready||!quotes||!locationFixes||!mapMutex){ready=false;M5.Display.drawString("Memory allocation failed",100,233);return;}
-  medaka::imu=M5.Imu.isEnabled();pomodoro::begin();
+  quotes=xQueueCreate(1,sizeof(Quote));forecasts=xQueueCreate(1,sizeof(weather::Forecast));locationFixes=xQueueCreate(1,sizeof(location::Fix));mapMutex=xSemaphoreCreateMutex();
+  if(!ready||!quotes||!forecasts||!locationFixes||!mapMutex){ready=false;M5.Display.drawString("Memory allocation failed",100,233);return;}
+  medaka::imu=M5.Imu.isEnabled();pomodoro::begin();paradise::begin();
   setCpuFrequencyMhz(80);WiFi.mode(WIFI_OFF);WiFi.persistent(false);
   Preferences prefs;prefs.begin("fx-wifi",true);String stored=prefs.getString("networks");JsonDocument doc;
   if(!stored.isEmpty()&&!deserializeJson(doc,stored)){
@@ -369,6 +427,7 @@ void loop(){
   M5.update();if(!ready){delay(50);return;}
   uint32_t now=millis();auto old=screens.app;bool wasMenu=screens.menu;
   pomodoro::update(now);
+  paradise::update(now);
   bool yellowHeld=M5.BtnA.wasHold(),yellowClick=M5.BtnA.wasClicked(),blueHeld=M5.BtnB.wasHold(),blueClick=M5.BtnB.wasClicked();
   auto touch=M5.Touch.getDetail();
   bool interaction=M5.BtnA.wasPressed()||M5.BtnB.wasPressed()||touch.wasPressed()||yellowHeld||yellowClick||blueHeld||blueClick;
@@ -388,12 +447,18 @@ void loop(){
     if(blueClick)medaka::world.feed(311);
     if(touch.wasHold())medaka::world.toggleLight();
     if(touch.wasClicked())medaka::world.ripple(touch.x,125);
+  }else if(screens.paradise()){
+    if(blueHeld)paradise::back();
+    else if(blueClick)paradise::input(true);
+    else if(yellowClick)paradise::input(false);
+    if(touch.wasClicked()&&!wasOff)paradise::touch(touch.x,touch.y);
   }else if(screens.pomodoro()){
     if(yellowClick)pomodoro::action('a');
-    if(blueHeld)pomodoro::action('r');
-    else if(blueClick)pomodoro::action('m');
+    if(blueHeld)pomodoro::action('R');
+    else if(blueClick)pomodoro::action('r');
     if(touch.wasClicked())pomodoro::touch(touch.x,touch.y);
-  }else if(screens.dollar()&&(blueHeld||touch.wasHold())){requestSetup();consumed=true;}
+  }else if((screens.dollar()||screens.weather())&&(blueHeld||touch.wasHold())){requestSetup();consumed=true;}
+  if(screens.weather()&&(blueClick||touch.wasClicked())){weatherDetails=!weatherDetails;consumed=true;}
   if(setupPending&&offAck==offTicket)startPortal();
   if(setupMode){server.handleClient();if(now-portalStarted>=120000){stopPortal();screens.openMenu();}}
   bool screenChanged=old!=screens.app||wasMenu!=screens.menu;
@@ -415,6 +480,7 @@ void loop(){
   if(restartAt&&int32_t(now-restartAt)>=0)ESP.restart();
   if(now-lastBattery>=30000||lastBattery==0||screenChanged){lastBattery=now;charging=M5.Power.isCharging()==m5::Power_Class::is_charging_t::is_charging;level=battery.update(M5.Power.getBatteryLevel(),charging);}
   int brightness=screens.tank()?medaka::energy.brightness(false):energy.brightness(now,level,charging,setupMode||setupPending);
+  if(screens.paradise()&&brightness>15)brightness=std::min(brightness,int(paradise::state.brightness));
   if(brightness!=appliedBrightness){appliedBrightness=brightness;if(brightness==0)M5.Display.sleep();else{M5.Display.wakeup();M5.Display.setBrightness(brightness);}}
   uint32_t interval=energy.refresh(level,charging);
   bool manual=!consumed&&screens.dollar()&&(blueClick||yellowClick||touch.wasClicked()||(wasOff&&interaction));
@@ -426,12 +492,30 @@ void loop(){
   if(locationManual){if(!hasNetwork||!locationConfigured())requestSetup();else{locationState=1;locationRequested=true;}}
   bool viewing=screens.dollar()&&brightness>0;
   if(viewing&&interval&&now-lastRequest>=interval){fetchRequested=true;lastRequest=now;}
+  bool weatherVisible=screens.weather()&&brightness>0;
+  if(weatherVisible){
+    weatherMode=true;bool refreshClick=!consumed&&yellowClick;
+    if(!weatherBusy&&!fetchRequested&&weatherRefresh.due(forecast,now,time(nullptr),refreshClick)){
+      if(!hasNetwork)requestSetup();else{weatherRefresh.requested(now);fetchRequested=true;}
+    }
+  }
   bool locating=screens.location()&&locationConfigured()&&(locationRequested||(locationState.load()>=1&&locationState.load()<=4));
-  wantNetwork=hasNetwork&&((viewing&&(interval>0||fetchRequested||networkState==3))||locating);
+  wantNetwork=hasNetwork&&((viewing&&(interval>0||fetchRequested||networkState==3))||
+    (screens.weather()&&brightness>0&&(fetchRequested||weatherBusy))||locating);
   bool changed=false;Quote next;
   if(xQueueReceive(quotes,&next,0)==pdTRUE&&next.epoch>=quote.epoch){quote=next;changed=true;if(historyCount==120){memmove(history,history+1,119*sizeof(float));historyCount--;}history[historyCount++]=(quote.bid+quote.ask)/2;}
   location::Fix fix;if(xQueueReceive(locationFixes,&fix,0)==pdTRUE){currentFix=fix;changed=true;}
-  if(brightness>0&&(changed||interaction||motionWoke||now-lastFrame>=(screens.tank()?medaka::energy.frameInterval():screens.pomodoro()?200:1000)||screenChanged)){lastFrame=now;render();}
-  if(Serial.available()&&Serial.read()=='?')Serial.printf("FX HOTSPOT version=%s wifi=%d network=%d state=%d quote=%d battery=%d charging=%d brightness=%d screen=%s heap=%u http=%d api=%d cpu=%u\n",kFirmwareVersion,WiFi.getMode()!=WIFI_OFF,selectedNetwork.load(),networkState.load(),quote.received!=0,level,charging,appliedBrightness,screens.name(),ESP.getFreeHeap(),lastHttpStatus.load(),lastApiStatus.load(),getCpuFrequencyMhz());
+  weather::Forecast nextForecast;if(xQueueReceive(forecasts,&nextForecast,0)==pdTRUE){forecast=nextForecast;changed=true;}
+  if(brightness>0&&(changed||interaction||motionWoke||now-lastFrame>=(screens.tank()?medaka::energy.frameInterval():screens.pomodoro()?200:screens.paradise()?50:1000)||screenChanged)){lastFrame=now;render();}
+  if(Serial.available()){
+    char command=Serial.read();
+    if(command=='P'){openApps();screens.selected=static_cast<int>(aquarium::App::Paradise);launchApp(now);render();}
+    else if(command=='F'){
+      Serial.print("FRAME_RGB 466 466\n");
+      uint8_t row[466*3];
+      for(int y=0;y<466;++y){frame.readRectRGB(0,y,466,1,row);Serial.write(row,sizeof(row));}
+    }
+    else if(command=='?')Serial.printf("FX HOTSPOT version=%s wifi=%d network=%d state=%d quote=%d battery=%d charging=%d brightness=%d screen=%s heap=%u http=%d api=%d cpu=%u weather=%d weather_http=%d pet_stage=%u pet_level=%u pet_saved=%u\n",kFirmwareVersion,WiFi.getMode()!=WIFI_OFF,selectedNetwork.load(),networkState.load(),quote.received!=0,level,charging,appliedBrightness,screens.name(),ESP.getFreeHeap(),lastHttpStatus.load(),lastApiStatus.load(),getCpuFrequencyMhz(),forecast.valid,weatherHttp.load(),paradise::state.stage,paradise::state.level,paradise::sequence);
+  }
   delay(screens.tank()?medaka::energy.loopDelay():brightness?20:50);
 }

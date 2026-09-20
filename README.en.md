@@ -10,9 +10,9 @@ On the iPhone enable Allow Others to Join and Maximize Compatibility, and keep t
 
 Home is attempted first (8 seconds), then iPhone (8 seconds). Failed connection attempts stop Wi-Fi and retry after 60 seconds while awake. Normal updates are every 5 seconds, every 15 seconds at <=20% battery, manual at <=10%. On battery, dim after 15 seconds and sleep the display/stop networking after 30 seconds without input. Active network calls finish within their timeouts before Wi-Fi turns off. Charging keeps the screen on with 5-second updates. Battery lifetime is not measured.
 
-Hold yellow anywhere to open the six-app launcher: USD/JPY, Aquarium, Battery, Wi-Fi Settings, Pomodoro, Location. Click yellow to move down, blue to launch, or tap a row. In USD/JPY, short clicks/taps request updates; blue hold or touch hold opens setup. All other screens stop normal quote traffic. Last prices and source timestamps remain visible when stale or unavailable.
+Hold yellow anywhere to open the eight-app launcher: USD/JPY, Aquarium, Battery, Wi-Fi Settings, Pomodoro, Weather, Paradise, Location. Click yellow to move down, blue to launch, or tap a row. In USD/JPY, short clicks/taps request updates; blue hold or touch hold opens setup. Other screens stop normal quote traffic; Weather and Location use their own network requests only while displayed.
 
-Build with `rtk proxy pio run -d firmware`; see README.md for tests, upload commands and official sources. The current firmware identifies itself as `FW v1.3.0` on the Battery screen and in the USB `?` response. Hardware compilation and host tests are verified; actual hotspot connectivity and battery lifetime require physical testing after Wi-Fi setup.
+Build with `rtk proxy pio run -d firmware`; see README.md for tests, upload commands and official sources. The current firmware identifies itself as `FW v1.5.0` on the Battery screen and in the USB `?` response. Hardware compilation and host tests are verified; actual hotspot connectivity and battery lifetime require physical testing after Wi-Fi setup.
 
 On 2026-09-12, v1.1.1 passed the board build, existing host tests, USB upload and flash hash verification. Device serial diagnostics confirmed boot, home Wi-Fi, HTTPS HTTP 200/API status 5, and restoration to 80MHz. Live quotes remain unverified during API maintenance. Visual display, iPhone hotspot and battery lifetime remain unverified. These are historical v1.1.1 results. Open Battery from the launcher to see the installed version.
 
@@ -26,7 +26,7 @@ Hardware regression check (requires pyserial; opening USB may reset the device):
 
 The aquarium includes nine fish, feeding, tap ripples, IMU motion, bubbles and the four-minute light cycle from [Medaka](https://github.com/KeijiTokunaga/m5stack-stopwatch-medaka), commit `887c6ff430a97aa6093403a9541e5973990d3fbd`. Yellow/blue clicks feed left/right; touch hold freezes/resumes lighting. After 60 seconds without activity it dims and renders at up to 5 fps without turning the screen off. The simulation pauses while another app is displayed and resumes on return.
 
-[Pomodoro](https://github.com/KeijiTokunaga/m5stack-pomodoro), commit `eed0a0682518116887c4608da266fc40e915b7ce`, retains 25-minute focus, 5-minute breaks and a 15-minute break after four completed focus sessions. Yellow click or the central box starts/pauses; blue click or SOUND toggles audio; blue hold resets the current phase. Tap NEXT to skip without earning a completed session. Yellow hold now opens the launcher instead of skipping.
+[Pomodoro](https://github.com/KeijiTokunaga/m5stack-pomodoro), commit `eed0a0682518116887c4608da266fc40e915b7ce`, retains 25-minute focus, 5-minute breaks and a 15-minute break after four completed focus sessions. Yellow click or the central box starts/pauses; blue click resets the current phase while preserving the completed count; blue hold resets all Pomodoro state. Tap SOUND to toggle audio and NEXT to skip without earning a completed session. Yellow hold opens the launcher.
 
 The timer continues in other apps and with the display asleep. A phase ends with three seconds of vibration and optional sound; the next phase waits paused. State is saved on actions/transitions and every 60 seconds while running. Reboot restores the saved state paused; powered-off time is not counted and up to about 60 seconds of progress can be lost.
 
@@ -41,3 +41,7 @@ The launcher uses English labels and Font4. In Pomodoro, significant lift/rotati
 ## v1.3.0
 
 Location is the sixth app. After explicit consent, it sends nearby Wi-Fi BSSIDs, signal strengths and channels through an authenticated user-operated proxy to estimate location and display a Google Static Maps JPEG with the reported accuracy. SSIDs and Wi-Fi passwords are never sent. The URL-signing secret remains on the proxy; the API key in each signed map URL must be protected with API restrictions, signing and quotas. Coordinates and map images stay in device RAM only. See `proxy/README.md` for deployment. Host tests and the board build pass; live Google API and on-device visual verification remain pending.
+
+## v1.5.0
+
+Weather and Paradise from the previous integrated firmware are combined with Location in one eight-app build. Paradise includes care, growth, generations, mini games and dual-slot persistence; see `docs/paradise.md` (Japanese) for its controls and scope.

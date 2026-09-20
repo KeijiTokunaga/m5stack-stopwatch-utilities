@@ -16,17 +16,19 @@ int main(){
  energy.wake(UINT32_MAX-100);assert(energy.brightness(100,50,false)==80);
  setenv("TZ","UTC",1);tzset();
  aquarium::Screens s;assert(s.dollar());
- for(int app=0;app<6;++app){
+ for(int app=0;app<aquarium::Screens::count;++app){
    s.openMenu();assert(s.menu&&!s.dollar()&&!s.tank());
    s.selected=app;s.launch();assert(!s.menu&&static_cast<int>(s.app)==app);
    s.openMenu();assert(s.selected==app);
  }
- s.selected=5;s.next();assert(s.selected==0);
- const int centers[]={105,152,199,246,293,340};for(int row=0;row<6;++row)assert(s.hit(233,centers[row])==row);
- assert(s.hit(87,105)==-1&&s.hit(378,105)==-1&&s.hit(233,126)==-1&&s.hit(233,368)==-1);
+ s.selected=7;s.next();assert(s.selected==0);
+ const int centers[]={92,131,170,209,248,287,326,365};for(int row=0;row<8;++row)assert(s.hit(233,centers[row])==row);
+ assert(s.hit(87,92)==-1&&s.hit(378,92)==-1&&s.hit(233,110)==-1&&s.hit(233,383)==-1);
  s.selected=2;s.launch();assert(s.battery()&&!s.dollar());
  s.openMenu();s.selected=1;s.launch();assert(s.tank()&&!s.battery());
- s.openMenu();s.selected=5;s.launch();assert(s.location()&&!s.dollar());
+ s.openMenu();s.selected=5;s.launch();assert(s.weather()&&!s.dollar());
+ s.openMenu();s.selected=6;s.launch();assert(s.paradise()&&!s.weather());
+ s.openMenu();s.selected=7;s.launch();assert(s.location()&&!s.dollar());
  aquarium::Battery b;assert(b.update(-1,false)==-1);assert(b.update(70,false)==70);assert(b.update(75,false)==70);assert(b.update(80,true)==80);assert(b.update(101,true)==80);
  std::string valid=R"({"symbol":"USD_JPY","bid":"153.490","ask":"153.587","timestamp":"2026-09-09T22:04:38.478Z","status":"OPEN"})";
  Quote q;assert(parseQuote((const uint8_t*)valid.data(),valid.size(),100,q));assert(q.open&&q.bid==153.49);
